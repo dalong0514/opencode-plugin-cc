@@ -1,0 +1,6 @@
+{
+  "name": "opencode",
+  "version": "0.1.0",
+  "description": "Use opencode models from Claude Code to delegate tasks or review code.",
+  "author": { "name": "dalong" }
+}
