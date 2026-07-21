@@ -4,6 +4,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { buildSpawnSpec, resolveOpencodeBinary } from "./opencode.mjs";
 import { terminateProcessTree } from "./process.mjs";
@@ -111,12 +112,30 @@ function markServerFailure(cwd, detail) {
   });
 }
 
+const BABYSITTER_PATH = path.resolve(fileURLToPath(new URL("../serve-babysitter.mjs", import.meta.url)));
+
 function startServerProcess(cwd, env, password) {
+  const serverEnv = { ...env, [SERVER_PASSWORD_ENV]: password };
+  if (process.platform === "win32") {
+    // Direct detached spawn would give the launcher shim's re-spawned runtime a
+    // visible console window; a non-detached spawn dies with the companion via
+    // libuv's kill-on-close job object. The babysitter (see its header comment)
+    // avoids both: it runs detached and console-less, and keeps serve under a
+    // hidden console. Recorded pid = babysitter pid; taskkill /T reaps the tree.
+    return spawn(process.execPath, [BABYSITTER_PATH], {
+      cwd,
+      env: serverEnv,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+  }
+
   const binary = resolveOpencodeBinary(env);
   const spec = buildSpawnSpec(binary, ["serve", "--port", "0"]);
   return spawn(spec.command, spec.args, {
     cwd,
-    env: { ...env, [SERVER_PASSWORD_ENV]: password },
+    env: serverEnv,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
