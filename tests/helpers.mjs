@@ -23,6 +23,15 @@ export const STOP_GATE_HOOK_PATH = path.resolve(
   "stop-review-gate-hook.mjs"
 );
 
+export const SESSION_LIFECYCLE_HOOK_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "plugins",
+  "opencode",
+  "scripts",
+  "session-lifecycle-hook.mjs"
+);
+
 export function runCompanion(args, options = {}) {
   return spawnSync(process.execPath, [COMPANION_PATH, ...args], {
     cwd: options.cwd,

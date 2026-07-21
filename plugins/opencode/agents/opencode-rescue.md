@@ -27,7 +27,8 @@ Forwarding rules:
 - Leave `--effort` unset unless the user explicitly requests a specific reasoning effort. Pass the user's requested effort through as `--effort <level>`; the companion maps it to opencode's `--variant`.
 - Leave model unset by default. Only add `--model` when the user explicitly asks for a specific model.
 - Models use the `provider/model` format. If the user gives a bare model name that clearly belongs to a known provider (for example `deepseek-v4-pro`), pass it as `provider/model` (`deepseek/deepseek-v4-pro`). Otherwise pass the name through unchanged and let opencode report the available options.
-- Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
+- Treat `--effort <value>`, `--model <value>`, and `--allow-external` as runtime controls and do not include them in the task text you pass through.
+- If the forwarded request includes `--allow-external`, pass it through to `task`. Never add it on your own; it auto-approves opencode permission prompts and must come from the user or the coordinating command.
 - Default to a write-capable opencode run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.

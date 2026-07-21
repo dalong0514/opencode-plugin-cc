@@ -17,6 +17,7 @@ import {
   runOpencodeTurn
 } from "./lib/opencode.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
+import { clearServerRecord, ensureCompanionServer } from "./lib/server.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
@@ -63,7 +64,7 @@ function printUsage() {
       "  node scripts/opencode-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/opencode-companion.mjs models [--json]",
       "  node scripts/opencode-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <provider/model>] [--effort <level>] [focus text]",
-      "  node scripts/opencode-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <provider/model>] [--effort <level>] [prompt]",
+      "  node scripts/opencode-companion.mjs task [--background] [--write] [--allow-external] [--resume-last|--resume|--fresh] [--model <provider/model>] [--effort <level>] [prompt]",
       "  node scripts/opencode-companion.mjs status [job-id] [--all] [--wait] [--json]",
       "  node scripts/opencode-companion.mjs result [job-id] [--json]",
       "  node scripts/opencode-companion.mjs cancel [job-id] [--json]"
@@ -316,6 +317,35 @@ function resolveLatestTrackedTaskSession(cwd, options = {}) {
   return null;
 }
 
+// Attach the run to the shared warm server when one is available; if the
+// attached run dies before producing any session event, restart once without
+// the server so a broken server never blocks the task.
+async function runTurnWithSharedServer(cwd, turnOptions) {
+  const server = await ensureCompanionServer(cwd, {
+    env: process.env,
+    onProgress: turnOptions.onProgress
+  });
+  if (!server?.url) {
+    return await runOpencodeTurn(cwd, turnOptions);
+  }
+
+  const attached = await runOpencodeTurn(cwd, {
+    ...turnOptions,
+    attachUrl: server.url,
+    serverPassword: server.password ?? null
+  });
+  if (attached.status === 0 || attached.threadId) {
+    return attached;
+  }
+
+  turnOptions.onProgress?.({
+    message: "Attached run failed before starting a session; retrying without the shared server.",
+    phase: "starting"
+  });
+  clearServerRecord(cwd);
+  return await runOpencodeTurn(cwd, turnOptions);
+}
+
 async function executeReviewRun(request) {
   ensureOpencodeAvailable(request.cwd);
   ensureGitRepository(request.cwd);
@@ -327,7 +357,7 @@ async function executeReviewRun(request) {
   const focusText = request.focusText?.trim() ?? "";
   const context = collectReviewContext(request.cwd, target);
   const prompt = buildReviewPrompt(context, focusText);
-  const result = await runOpencodeTurn(context.repoRoot, {
+  const result = await runTurnWithSharedServer(context.repoRoot, {
     prompt,
     model: request.model,
     variant: request.variant,
@@ -399,33 +429,48 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const result = await runOpencodeTurn(workspaceRoot, {
+  const result = await runTurnWithSharedServer(workspaceRoot, {
     resumeSessionId,
     prompt: request.prompt,
     defaultPrompt: resumeSessionId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     variant: request.variant,
     write: request.write,
+    autoApprove: Boolean(request.allowExternal),
     title: resumeSessionId ? null : buildTaskSessionTitle(request.prompt || DEFAULT_CONTINUE_PROMPT),
     onProgress: request.onProgress
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
-  const failureMessage = result.errorMessage || result.stderr || "";
+  const permissionRejections = result.permissionRejections ?? [];
+  // A run that produced no answer after the sandbox auto-rejected a permission
+  // is a failure even though opencode itself exits 0.
+  const permissionBlocked = permissionRejections.length > 0 && !rawOutput.trim();
+  const exitStatus = result.status !== 0 ? result.status : permissionBlocked ? 1 : 0;
+  const failureMessage =
+    result.errorMessage ||
+    (permissionBlocked
+      ? `opencode sandbox auto-rejected permission request(s): ${permissionRejections.join("; ")}`
+      : "") ||
+    result.stderr ||
+    "";
   const rendered = renderTaskResult({
     rawOutput,
-    failureMessage
+    failureMessage,
+    permissionRejections,
+    allowExternalUsed: Boolean(request.allowExternal)
   });
   const payload = {
-    status: result.status,
+    status: exitStatus,
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    usage: result.usage
+    usage: result.usage,
+    permissionRejections
   };
 
   return {
-    exitStatus: result.status,
+    exitStatus,
     threadId: result.threadId,
     turnId: null,
     payload,
@@ -506,13 +551,14 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, variant, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, model, variant, prompt, write, allowExternal, resumeLast, jobId }) {
   return {
     cwd,
     model,
     variant,
     prompt,
     write,
+    allowExternal,
     resumeLast,
     jobId
   };
@@ -635,7 +681,7 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "variant", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "allow-external", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model",
       effort: "variant"
@@ -654,6 +700,7 @@ async function handleTask(argv) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
   const write = Boolean(options.write);
+  const allowExternal = Boolean(options["allow-external"]);
   const taskMetadata = buildTaskRunMetadata({
     prompt,
     resumeLast
@@ -670,6 +717,7 @@ async function handleTask(argv) {
       variant,
       prompt,
       write,
+      allowExternal,
       resumeLast,
       jobId: job.id
     });
@@ -688,6 +736,7 @@ async function handleTask(argv) {
         variant,
         prompt,
         write,
+        allowExternal,
         resumeLast,
         jobId: job.id,
         onProgress: progress

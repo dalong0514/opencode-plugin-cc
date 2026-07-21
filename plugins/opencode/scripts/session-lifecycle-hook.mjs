@@ -4,6 +4,7 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { terminateProcessTree } from "./lib/process.mjs";
+import { stopCompanionServer } from "./lib/server.mjs";
 import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
@@ -75,6 +76,12 @@ function handleSessionStart(input) {
 function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
   cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  try {
+    // If another live session still needs a server, its next task restarts one.
+    stopCompanionServer(resolveWorkspaceRoot(cwd));
+  } catch {
+    // Ignore teardown failures during session shutdown.
+  }
 }
 
 function main() {

@@ -25,6 +25,7 @@ Command selection:
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, pass it through to `task`. Models use the `provider/model` format, for example `deepseek/deepseek-v4-pro`, `deepseek/deepseek-reasoner`, or `opencode/big-pickle`.
 - If the forwarded request includes `--effort`, pass it through to `task`. The companion maps it to opencode's `--variant`, which is provider-specific; common values are `minimal`, `low`, `medium`, `high`, `max`, and `xhigh`.
+- If the forwarded request includes `--allow-external`, pass it through to `task`. It auto-approves opencode permission prompts (sandbox access outside the project); never add it unless it was in the forwarded request.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.

@@ -158,14 +158,36 @@ export function renderReviewResult(result, meta) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+function renderPermissionWarning(rejections, allowExternalUsed) {
+  const lines = ["", "WARNING: the opencode sandbox auto-rejected permission request(s):"];
+  for (const rejection of rejections) {
+    lines.push(`- ${rejection}`);
+  }
+  lines.push("Files outside the project workspace are blocked in non-interactive runs.");
+  lines.push(
+    allowExternalUsed
+      ? "The run already used --allow-external; the denied permission must be explicitly allowed in opencode's own permission config."
+      : "Fix: copy the needed files into the project first, or rerun the task with --allow-external to auto-approve permissions (use only when the task is trusted)."
+  );
+  return lines.join("\n");
+}
+
 export function renderTaskResult(parsedResult) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
+  const rejections = Array.isArray(parsedResult?.permissionRejections)
+    ? parsedResult.permissionRejections
+    : [];
+  const warning = rejections.length
+    ? renderPermissionWarning(rejections, Boolean(parsedResult?.allowExternalUsed))
+    : "";
+
   if (rawOutput) {
-    return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    const body = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    return warning ? `${body}${warning}\n` : body;
   }
 
   const message = String(parsedResult?.failureMessage ?? "").trim() || "opencode did not return a final message.";
-  return `${message}\n`;
+  return warning ? `${message}\n${warning}\n` : `${message}\n`;
 }
 
 export function renderStatusReport(report) {

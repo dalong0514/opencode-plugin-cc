@@ -4,7 +4,16 @@ import path from "node:path";
 import test from "node:test";
 
 import { buildEnv, installFakeOpencode, readInvocations } from "./fake-opencode-fixture.mjs";
-import { COMPANION_PATH, STOP_GATE_HOOK_PATH, makeGitRepo, makeTempDir, runCompanion, runHook, waitFor } from "./helpers.mjs";
+import {
+  COMPANION_PATH,
+  SESSION_LIFECYCLE_HOOK_PATH,
+  STOP_GATE_HOOK_PATH,
+  makeGitRepo,
+  makeTempDir,
+  runCompanion,
+  runHook,
+  waitFor
+} from "./helpers.mjs";
 
 function freshContext(overrides = {}) {
   const fixture = installFakeOpencode();
@@ -242,6 +251,79 @@ test("stop gate allows when disabled and blocks on BLOCK output when enabled", (
   const allowed = runHook(STOP_GATE_HOOK_PATH, hookInput, { cwd: repo.dir, env: allowedEnv, timeout: 60000 });
   assert.equal(allowed.status, 0, allowed.stderr);
   assert.equal(allowed.stdout.trim(), "");
+});
+
+function serveInvocations(fixture) {
+  return readInvocations(fixture.logFile).filter((entry) => entry.argv[0] === "serve");
+}
+
+test("task starts one shared server and attaches subsequent runs to it", () => {
+  const { fixture, repo, env } = freshContext();
+
+  const first = runCompanion(["task", "first prompt"], { cwd: repo.dir, env });
+  assert.equal(first.status, 0, first.stderr);
+  const second = runCompanion(["task", "second prompt"], { cwd: repo.dir, env });
+  assert.equal(second.status, 0, second.stderr);
+
+  assert.equal(serveInvocations(fixture).length, 1, "the warm server must be reused across runs");
+  const runs = readInvocations(fixture.logFile).filter((entry) => entry.argv[0] === "run");
+  assert.equal(runs.length, 2);
+  for (const run of runs) {
+    const attachIndex = run.argv.indexOf("--attach");
+    assert.ok(attachIndex !== -1, "runs must attach to the shared server");
+    assert.match(run.argv[attachIndex + 1], /^http:\/\/127\.0\.0\.1:\d+$/);
+  }
+});
+
+test("SessionEnd stops the shared server; the next task starts a fresh one", () => {
+  const { fixture, repo, env } = freshContext();
+
+  const first = runCompanion(["task", "warm up"], { cwd: repo.dir, env });
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(serveInvocations(fixture).length, 1);
+
+  const hook = runHook(
+    SESSION_LIFECYCLE_HOOK_PATH,
+    { hook_event_name: "SessionEnd", cwd: repo.dir, session_id: "claude-session-test" },
+    { cwd: repo.dir, env }
+  );
+  assert.equal(hook.status, 0, hook.stderr);
+
+  const second = runCompanion(["task", "after restart"], { cwd: repo.dir, env });
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(serveInvocations(fixture).length, 2, "a stopped server must be replaced, not reused");
+});
+
+test("task falls back to a plain run when the server cannot start", () => {
+  const { fixture, repo, env } = freshContext({ FAKE_OPENCODE_BEHAVIOR: "serve-fail" });
+
+  const result = runCompanion(["task", "no server available"], { cwd: repo.dir, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /FAKE-DONE/);
+
+  const invocation = lastRunInvocation(fixture);
+  assert.ok(!invocation.argv.includes("--attach"), "fallback runs must not attach");
+});
+
+test("permission auto-reject surfaces as an explicit failure with remediation", () => {
+  const { repo, env } = freshContext({ FAKE_OPENCODE_BEHAVIOR: "permission-reject" });
+
+  const result = runCompanion(["task", "read something outside"], { cwd: repo.dir, env });
+  assert.notEqual(result.status, 0, "a rejected run with no answer must fail");
+  assert.match(result.stdout, /auto-rejected permission request/);
+  assert.match(result.stdout, /external_directory \(outside-dir\/\*\)/);
+  assert.match(result.stdout, /--allow-external/);
+
+  const status = runCompanion(["status", "--json"], { cwd: repo.dir, env });
+  assert.equal(JSON.parse(status.stdout).latestFinished.status, "failed");
+});
+
+test("--allow-external forwards opencode's --auto approval flag", () => {
+  const { fixture, repo, env } = freshContext();
+
+  const result = runCompanion(["task", "--allow-external", "trusted task"], { cwd: repo.dir, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(lastRunInvocation(fixture).argv.includes("--auto"));
 });
 
 test("companion help prints usage", () => {

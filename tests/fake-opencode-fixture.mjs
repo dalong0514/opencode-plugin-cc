@@ -57,6 +57,20 @@ async function main() {
     return 0;
   }
 
+  if (argv[0] === "serve") {
+    if (behavior === "serve-fail") {
+      process.stderr.write("fake opencode: serve unsupported\\n");
+      return 1;
+    }
+    const net = require("node:net");
+    const server = net.createServer((socket) => socket.end());
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    process.stdout.write("opencode server listening on http://127.0.0.1:" + server.address().port + "\\n");
+    // Hold the port for a bounded TTL so tests can attach but never leak processes.
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_OPENCODE_SERVE_TTL_MS || 120000)));
+    return 0;
+  }
+
   if (argv[0] !== "run") {
     process.stderr.write("fake opencode: unknown command " + argv.join(" ") + "\\n");
     return 1;
@@ -76,6 +90,13 @@ async function main() {
   }
 
   emit({ type: "step_start", timestamp: 1, sessionID: activeSession, part: { type: "step-start", messageID: "msg_1" } });
+
+  if (behavior === "permission-reject") {
+    // Mimics the console line opencode prints when the sandbox denies access:
+    // ANSI-colored, non-JSON, and the process still exits 0 with no text event.
+    process.stdout.write("\\u001b[93m\\u001b[1m! \\u001b[0mpermission requested: external_directory (outside-dir/*); auto-rejecting\\n");
+    return 0;
+  }
 
   if (behavior === "with-tools" || behavior === "task-ok") {
     emit({
@@ -141,6 +162,8 @@ export function buildEnv(fixture, overrides = {}) {
     ...process.env,
     OPENCODE_COMPANION_BIN: fixture.scriptPath,
     FAKE_OPENCODE_LOG: fixture.logFile,
+    // Bound fake server lifetime so test runs never leak long-lived processes.
+    FAKE_OPENCODE_SERVE_TTL_MS: "60000",
     ...overrides
   };
 }

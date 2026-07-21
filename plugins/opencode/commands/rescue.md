@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the opencode rescue subagent
-argument-hint: "[--background|--wait] [--resume|--fresh] [--model <provider/model>] [--effort <minimal|low|medium|high|max|xhigh>] [what opencode should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--resume|--fresh] [--model <provider/model>] [--effort <minimal|low|medium|high|max|xhigh>] [--allow-external] [what opencode should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -11,15 +11,22 @@ The final user-visible response must be opencode's output verbatim.
 Raw user request:
 $ARGUMENTS
 
+Task-content rules — apply BEFORE forwarding (they decide whether the first attempt can succeed):
+
+- opencode cannot see Claude Code's skills, slash commands, subagents, or MCP tools. If the task references any of them (for example "运行 xxx 技能" or "use the xxx skill"), first read the referenced definition yourself and rewrite the task text so it is self-contained: inline the needed workflow steps and copy any required scripts into the project. Never forward a bare skill name and hope opencode finds it.
+- opencode's sandbox auto-rejects file access outside the project workspace in non-interactive runs. If the task needs files outside the project, copy them into the project first (a temp subfolder is fine) and reference the in-project paths, or append `--allow-external` when the user explicitly trusts the task with auto-approved permissions.
+- Prefer project-relative paths in the task text; absolute paths that resolve outside the workspace will be rejected.
+
 Execution mode:
 
 - If the request includes `--background`, run the `opencode:opencode-rescue` subagent in the background.
 - If the request includes `--wait`, run the `opencode:opencode-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
-- `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
+- `--model`, `--effort`, and `--allow-external` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.
+- If nothing has been delegated to opencode earlier in this conversation, skip the resume-candidate check below and route normally — a fresh conversation has nothing to resume, and the check costs an extra command invocation.
 - Otherwise, before starting opencode, check for a resumable rescue session from this Claude session by running:
 
 ```bash

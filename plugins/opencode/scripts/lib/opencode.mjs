@@ -204,7 +204,29 @@ export function buildRunArgs(options = {}) {
   if (options.cwd) {
     args.push("--dir", options.cwd);
   }
+  if (options.attachUrl) {
+    args.push("--attach", options.attachUrl);
+  }
+  if (options.autoApprove) {
+    args.push("--auto");
+  }
   return args;
+}
+
+// Matches ANSI color codes with or without the ESC byte (logs often strip it).
+const ANSI_RE = /\u001b?\[[0-9;]*m/g;
+const PERMISSION_REJECT_RE = /permission requested:\s*(.+?);\s*auto-rejecting/g;
+
+export function extractPermissionRejections(text) {
+  const plain = String(text ?? "").replace(ANSI_RE, "");
+  const rejections = [];
+  for (const match of plain.matchAll(PERMISSION_REJECT_RE)) {
+    const detail = match[1].trim();
+    if (detail && !rejections.includes(detail)) {
+      rejections.push(detail);
+    }
+  }
+  return rejections;
 }
 
 export function resolveRunAgent(options = {}) {
@@ -229,15 +251,20 @@ export async function runOpencodeTurn(cwd, options = {}) {
     agent,
     resumeSessionId: options.resumeSessionId ?? null,
     title: options.resumeSessionId ? null : options.title ?? null,
-    cwd
+    cwd,
+    attachUrl: options.attachUrl ?? null,
+    autoApprove: Boolean(options.autoApprove)
   });
   const binary = resolveOpencodeBinary(env);
   const spec = buildSpawnSpec(binary, runArgs);
+  const childEnv = options.serverPassword
+    ? { ...env, OPENCODE_SERVER_PASSWORD: options.serverPassword }
+    : env;
 
   onProgress?.({
     message: `Starting opencode (${agent} agent${options.model ? `, model ${options.model}` : ""}${
       options.variant ? `, variant ${options.variant}` : ""
-    }).`,
+    }${options.attachUrl ? ", attached to shared server" : ""}).`,
     phase: "starting"
   });
 
@@ -246,7 +273,7 @@ export async function runOpencodeTurn(cwd, options = {}) {
     try {
       child = spawn(spec.command, spec.args, {
         cwd,
-        env,
+        env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true
       });
@@ -257,6 +284,7 @@ export async function runOpencodeTurn(cwd, options = {}) {
 
     let sessionId = options.resumeSessionId ?? null;
     let stderrText = "";
+    let consoleText = "";
     let errorMessage = "";
     let lastMessageId = null;
     const textsByMessage = new Map();
@@ -306,6 +334,10 @@ export async function runOpencodeTurn(cwd, options = {}) {
     rl.on("line", (line) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith("{")) {
+        // Console chatter (permission prompts etc.) rides the same stream.
+        if (trimmed) {
+          consoleText += `${line}\n`;
+        }
         return;
       }
       let event;
@@ -377,12 +409,19 @@ export async function runOpencodeTurn(cwd, options = {}) {
       const finalMessage = finalTexts.join("\n\n").trim();
       const allTexts = [...textsByMessage.values()].flat().join("\n\n").trim();
       const exitStatus = timedOut ? 124 : code ?? (signal ? 1 : 0);
+      const permissionRejections = extractPermissionRejections(`${consoleText}\n${stderrText}`);
 
       if (timedOut && !errorMessage) {
         errorMessage = `opencode run timed out after ${options.timeoutMs} ms.`;
       }
       if (exitStatus !== 0 && !errorMessage) {
         errorMessage = stderrText.trim() || `opencode exited with status ${exitStatus}${signal ? ` (signal ${signal})` : ""}`;
+      }
+      if (permissionRejections.length > 0) {
+        onProgress?.({
+          message: `opencode sandbox auto-rejected: ${permissionRejections.join("; ")}`,
+          phase: "running"
+        });
       }
 
       onProgress?.({
@@ -401,6 +440,7 @@ export async function runOpencodeTurn(cwd, options = {}) {
         usage,
         errorMessage,
         stderr: stderrText,
+        permissionRejections,
         timedOut
       });
     });
